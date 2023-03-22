@@ -20,6 +20,8 @@ class Colours(Enum):
     INDEX = 0xfe1437
     IF = 0x007f0e
     END_IF = 0x4cff00
+    THEN = 0x21ff3e
+    END_THEN = 0x1c1cff
     ELSE = 0x56ff94
     END_ELSE = 0xffbe47
     TRUE = 0x7f6a00
@@ -69,22 +71,87 @@ class Colours(Enum):
     EQUATION = 0x16741a
     IMPORT = 0x42f301
 
+class PawetBodyBase:
+
+    def __init__(self, parameters: dict, body: list, name: str, parent_scope: dict):
+        self.parameters = parameters
+        self.body = body
+        self.name = name
+        self.visible_variables = parent_scope
+
+    def execute(self, parameter_values: list):
+        # paramater match error checking
+        if len(parameter_values) != len(self.parameters):
+            raise PawetInterpreterError(0, 0, f"{self.name}: Parameters supplied do not match function parameter count")
+        for index in range(0, len(parameter_values)):
+            if type(parameter_values[index]) != self.parameters[0]:
+                raise PawetInterpreterError(0, 0, f"{self.name}: Value(s) supplied does not match parameter types")
+
+class PawetFunction(PawetBodyBase):
+
+    def __init__(self, parameters: dict, body: list, name: str, parent_scope: dict, return_type: str):
+        super(PawetFunction, self).__init__(parameters, body, name, parent_scope)
+        self.return_type = return_type
+
+    def execute(self, parameter_values: list):
+        super(PawetFunction, self).execute(parameter_values)
+        index = 0
+        for elem in self.parameters:
+            self.visible_variables[elem] = (self.parameters[elem], parameter_values[index])
+            index = index + 1
+        pawet = PawetInterpreter(False, body=self.body, parent_scope=self.visible_variables)
+        if self.return_type != 'void':
+            return pawet.interpret()
+        else:
+            pawet.interpret()
+
+
+class PawetIfElseBody(PawetBodyBase):
+
+    def __init__(self, body: list, parent_scope: dict, else_if_conditions = [], else_if_bodies = [], else_body = []):
+        super(PawetIfElseBody, self).__init__({'val': bool}, body, "if-statement", parent_scope)
+        self.else_if_conditions = else_if_conditions
+        self.else_if_bodies = else_if_bodies
+        self.else_body = else_body
+
+    def execute(self, parameter_values: list):
+        super(PawetIfElseBody, self).execute(parameter_values)
+        if parameter_values[0]:
+            pawet = PawetInterpreter(False, body=self.body, parent_scope=self.visible_variables)
+            pawet.interpret()
+            return
+        if len(self.else_if_conditions) != 0 and len(self.else_if_bodies) != 0:
+            if len(self.else_if_conditions) != len(self.else_if_bodies):
+                raise PawetInterpreterError(0, 0, "The amount of else if conditions do not match the amount of else if bodies. This should never happen...")
+            for index in range(0, len(self.else_if_conditions)):
+                if self.else_if_conditions[index]:
+                    pawet = PawetInterpreter(False, body=self.else_if_bodies[index], parent_scope=self.visible_variables)
+                    pawet.interpret()
+                    return
+        # only the else body to execute now as everything else should have exited if conditions were true
+        if len(self.else_body) != 0:
+            pawet = PawetInterpreter(False, body=self.else_body, parent_scope=self.visible_variables)
+            pawet.interpret()
+
+# todo: add loops here        
+
 class PawetInterpreter:
 
-    def __init__(self, image_file_path: str):
-        im = Image.open(image_file_path)
-        im = im.convert("RGB")
-        self.width, self.height = im.size
-        self.image = list(im.getdata())
-        im.close()
+    def __init__(self, base: bool, image_file_path: str = "", body: list = [], parent_scope = {}):
+        self.base = base
+        if base:
+            im = Image.open(image_file_path)
+            im = im.convert("RGB")
+            self.image = [(x[0] << 16) + (x[1] << 8) + x[2] for x in list(im.getdata())]
+            im.close()
+        else:
+            self.image = body
         self.current_index = 0
-        self.x = 0
-        self.y = 0
-        self.variables = {}
+        self.variables = parent_scope
         self.functions = {}
     
     def interpret(self):
-        while self.current_index < self.width * self.height:
+        while self.current_index < len(self.image):
             pix = self.read_next_pixel()
             if pix == Colours.END_OF_PROGRAM.value:
                 break
@@ -100,7 +167,7 @@ class PawetInterpreter:
                     raise PawetInterpreterError(self.current_index, pix, "Missing end of statement pixel for import statement")
                 if not os.path.isfile(to_import):
                     raise PawetInterpreterError(self.current_index, pix, "That pawet image file is not found")
-                paw = PawetInterpreter(to_import)
+                paw = PawetInterpreter(True, image_file_path=to_import)
                 self.functions.update(paw.functions)
                 self.variables.update(paw.variables)
             elif pix == Colours.BOOL_TYPE.value:
@@ -119,7 +186,11 @@ class PawetInterpreter:
                 self.parse_print(self.variables)
                 continue
             elif pix == Colours.VAR_FUN_NAME.value:
-                var_ref = self.parse_var_fun_reference()
+                var_ref, is_func, func_params = self.parse_var_fun_reference()
+                if is_func:
+                    if not var_ref in self.functions:
+                        raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                    self.functions[var_ref].execute(func_params)
                 if not var_ref in self.variables:
                     raise PawetInterpreterError(self.current_index, pix, "Variable not initialized")
                 pix = self.read_next_pixel()
@@ -133,17 +204,171 @@ class PawetInterpreter:
                     self.variables[var_ref] = (self.variables[var_ref][0], self.variables[var_ref][1] - 1)
                 if self.read_next_pixel() != Colours.STATEMENT_END.value:
                     raise PawetInterpreterError(self.current_index, pix, "Statement not closed")
+                    
                 continue
+            elif pix == Colours.FUNCTION.value:
+                if not self.base:
+                    raise PawetInterpreterError(self.current_index, pix, "Cannot have functions within functions")
+                name, signature, return_type, body = self.parse_function()
+                self.functions[name] = PawetFunction(signature, body, name, self.variables, return_type)
+                continue
+            elif pix == Colours.RETURN.value:
+                pix = self.read_next_pixel()
+                val = None
+                if pix == Colours.STATEMENT_END.value:
+                    return
+                if pix == Colours.EQUATION.value:
+                    val = self.parse_equation()
+                elif pix == Colours.TRUE.value:
+                    val = True
+                elif pix == Colours.FALSE.value:
+                    val = False
+                elif pix == Colours.INT_LITERAL.value:
+                    val = self.parse_int_literal()
+                elif pix == Colours.FLOAT_LITERAL.value:
+                    val = self.parse_float_literal()
+                elif pix == Colours.STRING_LITERAL.value:
+                    val = self.parse_string_literal()
+                elif pix == Colours.VAR_FUN_NAME.value:
+                    val, is_function, fun_name, params = self.parse_var_fun_reference()
+                    if is_function:
+                        if not fun_name in self.functions:
+                            raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                        return self.functions[fun_name].execute(params)
+                return val
             else:
                 raise PawetInterpreterError(self.current_index, pix, "Unexpected pixel, Did you maybe forget to escape?")
     
+    def parse_function_call(self):
+        param_vals = []
+        current_val = None
+        while True:
+            pix = self.read_next_pixel()
+            if pix == Colours.SKIP.value:
+                continue
+            if pix == Colours.BRACKET_END.value:
+                if current_val != None:
+                    param_vals.append(current_val)
+                break
+            if pix == Colours.INT_LITERAL.value:
+                current_val = self.parse_int_literal()
+                continue
+            elif pix == Colours.FLOAT_LITERAL.value:
+                current_val = self.parse_float_literal()
+                continue
+            elif pix == Colours.TRUE.value:
+                current_val = True
+                continue
+            elif pix == Colours.FALSE.value:
+                current_val = False
+                continue
+            elif pix == Colours.STRING_LITERAL.value:
+                current_val = self.parse_string_literal()
+                continue
+            elif pix == Colours.EQUATION.value:
+                current_val = self.parse_equation()
+                continue
+            elif pix == Colours.VAR_FUN_NAME.value:
+                val, is_function, fun_name, params = self.parse_var_fun_reference()
+                if is_function:
+                    if not fun_name in self.functions:
+                        raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                    current_val = self.functions[fun_name].execute(params)
+                else:
+                    current_val = val
+                continue
+            if current_val != None and pix == Colours.COMMA.value:
+                param_vals.append(current_val)
+                current_val = None
+        return param_vals
+
+
+    def parse_function(self):
+        name: str = ""
+        return_type: str = ""
+        parameters = {}
+        body = []
+        while True:
+            pix = self.read_next_pixel()
+            if pix == Colours.SKIP.value:
+                continue
+            if pix == Colours.END_FUNCTION.value:
+                break
+            if pix == Colours.VOID_TYPE.value:
+                return_type = "void"
+                continue
+            elif pix == Colours.STRING_TYPE.value:
+                return_type = "str"
+                continue
+            elif pix == Colours.FLOAT_TYPE.value:
+                return_type = "float"
+                continue
+            elif pix == Colours.BOOL_TYPE.value:
+                return_type = "bool"
+                continue
+            elif pix == Colours.INT_TYPE.value:
+                return_type = "int"
+                continue
+            if pix == Colours.VAR_FUN_NAME.value:
+                name, _, _ = self.parse_var_fun_reference()
+                continue
+            if pix == Colours.BRACKET_START.value:
+                parameters = self.parse_function_signature()
+                continue
+            body.append(pix)
+        if name == "":
+            raise PawetInterpreterError(self.current_index, None, "Function does not have a name")
+        if return_type == "":
+            raise PawetInterpreterError(self.current_index, None, f"{name} function has no return type (if none is needed, use void)")
+        return name, parameters, return_type, body
+        
+    def parse_function_signature(self):
+        signature = {}
+        current_type = None
+        param_name: str = ""
+        while True:
+            pix = self.read_next_pixel()
+            if pix == Colours.SKIP.value:
+                continue
+            if pix == Colours.BRACKET_END.value:
+                if current_type != None and param_name != "":
+                    if param_name in signature:
+                        raise PawetInterpreterError(self.current_index, pix, "Function parameter already declared")
+                    signature[param_name] = current_type
+                break
+            if pix == Colours.STRING_TYPE.value:
+                current_type = str
+                continue
+            elif pix == Colours.BOOL_TYPE.value:
+                current_type = bool
+                continue
+            elif pix == Colours.INT_TYPE.value:
+                current_type = int
+                continue
+            elif pix == Colours.FLOAT_TYPE.value:
+                current_type = float
+                continue
+            if pix == Colours.COMMA.value and current_type != None and param_name != "":
+                if param_name in signature:
+                    raise PawetInterpreterError(self.current_index, pix, "Function parameter already declared")
+                signature[param_name] = current_type
+                param_name = ""
+                current_type = None
+            else:
+                raise PawetInterpreterError(self.current_index, pix, "Invalid function signature decleration")
+        return signature
+
     def read_next_pixel(self) -> int:
-        if self.current_index >= self.width * self.height:
+        if self.current_index >= len(self.image):
             raise PawetInterpreterError(self.current_index, None, "End of image reached before end of program")
-        val: tuple = self.image[self.current_index]
+        val = self.image[self.current_index]
         self.current_index = self.current_index + 1
-        output = (val[0] << 16) + (val[1] << 8) + val[2]
-        return output
+        return val
+    
+    def peek_next_pixel(self) -> int:
+        if self.current_index + 1 >= len(self.image):
+            raise PawetInterpreterError(self.current_index, None, "End of image reached before end of program")
+        return self.image[self.current_index + 1]
 
     def parse_int_literal(self) -> int:
         pix = self.read_next_pixel()
@@ -236,8 +461,8 @@ class PawetInterpreter:
             if pix == Colours.SKIP.value:
                 pix = self.read_next_pixel()
                 continue
-            if pix == Colours.VAR_FUN_NAME.value:
-                var_name = self.parse_var_fun_reference()
+            if pix == Colours.VAR_FUN_NAME.value and not past_assignment:
+                var_name, _, _ = self.parse_var_fun_reference()
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.ASSIGNMENT.value:
@@ -250,7 +475,12 @@ class PawetInterpreter:
                 elif pix == Colours.FALSE.value:
                     val = False
                 elif pix == Colours.VAR_FUN_NAME.value:
-                    ref_var = self.parse_var_fun_reference()
+                    ref_var, is_func, func_params = self.parse_var_fun_reference()
+                    if is_func:
+                        if not ref_var in self.functions:
+                            raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                        val = self.functions[ref_var].execute(func_params)
+                        ref_var = None
                 elif pix == Colours.EQUATION.value:
                     val = self.parse_equation(context)
                 else:
@@ -281,7 +511,7 @@ class PawetInterpreter:
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.VAR_FUN_NAME.value and not past_assignment:
-                assignment_name = self.parse_var_fun_reference()
+                assignment_name, _, _ = self.parse_var_fun_reference()
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.ASSIGNMENT.value:
@@ -292,7 +522,12 @@ class PawetInterpreter:
                 if pix == Colours.INT_LITERAL.value:
                     literal = self.parse_int_literal()
                 elif pix == Colours.VAR_FUN_NAME.value:
-                    target_ref = self.parse_var_fun_reference()
+                    target_ref, is_func, func_params = self.parse_var_fun_reference()
+                    if is_func:
+                        if not target_ref in self.functions:
+                            raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                        literal = self.functions[target_ref].execute(func_params)
+                        target_ref = None
                 elif pix == Colours.EQUATION.value:
                     literal = self.parse_equation(context)
             pix = self.read_next_pixel()
@@ -318,7 +553,7 @@ class PawetInterpreter:
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.VAR_FUN_NAME.value and not past_assignment:
-                assignment_name = self.parse_var_fun_reference()
+                assignment_name, _, _ = self.parse_var_fun_reference()
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.ASSIGNMENT.value:
@@ -329,7 +564,12 @@ class PawetInterpreter:
                 if pix == Colours.FLOAT_LITERAL.value:
                     literal = self.parse_float_literal()
                 elif pix == Colours.VAR_FUN_NAME.value:
-                    target_ref = self.parse_var_fun_reference()
+                    target_ref, is_func, func_params = self.parse_var_fun_reference()
+                    if is_func:
+                        if not target_ref in self.functions:
+                            raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                        literal = self.functions[target_ref].execute(func_params)
+                        target_ref = None
                 elif pix == Colours.EQUATION.value:
                     literal = self.parse_equation(context)
             pix = self.read_next_pixel()
@@ -355,7 +595,7 @@ class PawetInterpreter:
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.VAR_FUN_NAME.value and not past_assignment:
-                assignment_name = self.parse_var_fun_reference()
+                assignment_name, _, _ = self.parse_var_fun_reference()
                 pix = self.read_next_pixel()
                 continue
             if pix == Colours.ASSIGNMENT.value:
@@ -366,7 +606,12 @@ class PawetInterpreter:
                 if pix == Colours.STRING_LITERAL.value:
                     literal = self.parse_string_literal()
                 elif pix == Colours.VAR_FUN_NAME.value:
-                    target_ref = self.parse_var_fun_reference()
+                    target_ref, is_func, func_params = self.parse_var_fun_reference()
+                    if is_func:
+                        if not target_ref in self.functions:
+                            raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                        literal = self.functions[target_ref].execute(func_params)
+                        target_ref = None
                 elif pix == Colours.EQUATION.value:
                     literal = self.parse_equation(context)
             pix = self.read_next_pixel()
@@ -395,15 +640,26 @@ class PawetInterpreter:
             vals_rgb.append(pix)
             prev_pix = pix
             pix = self.read_next_pixel()
-        return self.parse_string(vals_rgb)
+        name = self.parse_string(vals_rgb)
+        is_function_call = False
+        if self.peek_next_pixel() == Colours.BRACKET_START.value:
+            is_function_call = True
+            self.read_next_pixel()
+            param_vals = self.parse_function_call()
+        return name, is_function_call, param_vals
     
     def parse_print(self, context):
         following = self.read_next_pixel()
         if following == Colours.VAR_FUN_NAME.value:
-            ref = self.parse_var_fun_reference()
-            if not ref in context:
-                raise PawetInterpreterError(self.current_index, following, "Variable is not defined")
-            print(context[ref][1])
+            ref, is_func, func_params = self.parse_var_fun_reference()
+            if is_func:
+                if not ref in self.functions:
+                    raise PawetInterpreterError(self.current_index, following, "Function is undefined")
+                print(self.functions[ref].execute(func_params))
+            else:
+                if not ref in context:
+                    raise PawetInterpreterError(self.current_index, following, "Variable is not defined")
+                print(context[ref][1])
         elif following == Colours.INT_LITERAL.value:
             val = self.parse_int_literal()
             print(val)
@@ -457,14 +713,23 @@ class PawetInterpreter:
                 else:
                     vals.append(False)
             elif pix == Colours.VAR_FUN_NAME.value:
-                ref = self.parse_var_fun_reference()
-                if not ref in context:
-                    raise PawetInterpreterError(self.current_index, pix, "Variable not found")
-                if context[ref][0] == bool and not_next_val:
-                    not_next_val = False
-                    vals.append(not context[ref][1])
+                ref, is_func, func_params = self.parse_var_fun_reference()
+                if is_func:
+                    if not ref in self.functions:
+                        raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                    func_ret = self.functions[ref].execute(func_params)
+                    if type(func_ret) is bool and not_next_val:
+                        vals.append(not func_ret)
+                    else:
+                        vals.append(func_ret)
                 else:
-                    vals.append(context[ref][1])
+                    if not ref in context:
+                        raise PawetInterpreterError(self.current_index, pix, "Variable not found")
+                    if context[ref][0] == bool and not_next_val:
+                        not_next_val = False
+                        vals.append(not context[ref][1])
+                    else:
+                        vals.append(context[ref][1])
             elif pix == Colours.STRING_LITERAL.value:
                 vals.append(self.parse_string_literal())
             elif pix == Colours.INT_LITERAL.value:
