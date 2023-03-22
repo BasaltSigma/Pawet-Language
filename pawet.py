@@ -28,7 +28,6 @@ class Colours(Enum):
     END_FUNCTION = 0x57007f
     VAR_FUN_NAME = 0xffd800
     ESCAPE_NEXT = 0x7f0037  # escape a bracket or string or function demarcator in case a colour is that
-    VAR = 0x00ffff
     BOOL_TYPE = 0x0037ff
     INT_TYPE = 0x7f3300
     FLOAT_TYPE = 0x404040
@@ -62,6 +61,7 @@ class Colours(Enum):
     EQUALS = 0xadffe2
     LESS_EQUAL = 0xffd6a5
     LESS = 0xff5111
+    NOT_EQUAL = 0xff3538
     BREAK = 0xffd9cc
     CONTINUE = 0xff5eae
     END_OF_PROGRAM = 0xedfff2
@@ -175,10 +175,13 @@ class PawetInterpreter:
                 prev_pix = pix
                 pix = self.read_next_pixel()
                 continue
-            if pix == Colours.FLOAT_LITERAL.value and prev_pix != None and prev_pix != Colours.ESCAPE_NEXT.value:
+            if pix == Colours.FLOAT_LITERAL.value and prev_pix != Colours.ESCAPE_NEXT.value:
                 break
             if pix == Colours.POINT.value:
                 decimal_point_reached = True
+                prev_pix = pix
+                pix = self.read_next_pixel()
+                continue
             if decimal_point_reached:
                 decimal.append(pix)
             else:
@@ -498,6 +501,18 @@ class PawetInterpreter:
                 operators.append('%')
             elif pix == Colours.POWER.value:
                 operators.append('**')
+            elif pix == Colours.GREATER.value:
+                operators.append('>')
+            elif pix == Colours.GREATER_EQUAL.value:
+                operators.append('>=')
+            elif pix == Colours.EQUALS.value:
+                operators.append('==')
+            elif pix == Colours.LESS_EQUAL.value:
+                operators.append('<=')
+            elif pix == Colours.LESS.value:
+                operators.append('<')
+            elif pix == Colours.NOT_EQUAL.value:
+                operators.append('!=')
             prev_pix = pix
             pix = self.read_next_pixel()
         if len(vals) != len(operators) + 1:
@@ -540,5 +555,17 @@ class PawetInterpreter:
             return a % b
         elif operator == '**' and type(a) in numbers and type(b) in numbers:
             return a ** b
+        elif operator == '<' and type(a) in numbers and type(b) in numbers:
+            return a < b
+        elif operator == '<=' and type(a) in numbers and type(b) in numbers:
+            return a <= b
+        elif operator == '>=' and type(a) in numbers and type(b) in numbers:
+            return a >= b
+        elif operator == '>' and type(a) in numbers and type(b) in numbers:
+            return a > b
+        elif operator == '==':
+            return a == b
+        elif operator == '!=':
+            return a != b
         else:
             raise PawetInterpreterError(self.current_index, None, "Failed to use operator, check your types")

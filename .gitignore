@@ -1,0 +1,4 @@
+/__pycache__/
+
+# hide my own test thingy as that will change all the time
+test.py 
