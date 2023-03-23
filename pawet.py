@@ -70,6 +70,8 @@ class Colours(Enum):
     PRINT = 0xf18eff
     EQUATION = 0x16741a
     IMPORT = 0x42f301
+    STRUCT_START = 0x4affff
+    STRUCT_END = 0xceff96
 
 class PawetBodyBase:
 
@@ -117,7 +119,7 @@ class PawetIfElseBody(PawetBodyBase):
     def execute(self, parameter_values: list):
         super(PawetIfElseBody, self).execute(parameter_values)
         if parameter_values[0]:
-            pawet = PawetInterpreter(False, body=self.body, parent_scope=self.visible_variables)
+            pawet = PawetInterpreter("if-statement", False, body=self.body, parent_scope=self.visible_variables)
             pawet.interpret()
             return
         if len(self.else_if_conditions) != 0 and len(self.else_if_bodies) != 0:
@@ -125,15 +127,31 @@ class PawetIfElseBody(PawetBodyBase):
                 raise PawetInterpreterError(0, 0, "The amount of else if conditions do not match the amount of else if bodies. This should never happen...")
             for index in range(0, len(self.else_if_conditions)):
                 if self.else_if_conditions[index]:
-                    pawet = PawetInterpreter(False, body=self.else_if_bodies[index], parent_scope=self.visible_variables)
+                    pawet = PawetInterpreter("then-statement", False, body=self.else_if_bodies[index], parent_scope=self.visible_variables)
                     pawet.interpret()
                     return
         # only the else body to execute now as everything else should have exited if conditions were true
         if len(self.else_body) != 0:
-            pawet = PawetInterpreter(False, body=self.else_body, parent_scope=self.visible_variables)
+            pawet = PawetInterpreter("else-statement", False, body=self.else_body, parent_scope=self.visible_variables)
             pawet.interpret()
 
-# todo: add loops here        
+class PawetLoopBody(PawetBodyBase):
+
+    def __init__(self, body: list, parent_scope: dict, condition_body: list):
+        super(PawetLoopBody, self).__init__({'condition': bool}, body, "loop", parent_scope)
+        self.condition_body = condition_body
+    
+    def execute(self, parameter_values: list):
+        super(PawetLoopBody, self).execute(parameter_values)
+        pawet_condition = PawetInterpreter("loop-condition", False, body=self.condition_body, parent_scope=self.visible_variables)
+        pawet_body = PawetInterpreter("loop", False, body=self.body, parent_scope=self.visible_variables)
+        while pawet_condition.eval_condition():
+            command = pawet_body.interpret()
+            if type(command) is str and command == "continue-loop":
+                continue
+            if type(command) is str and command == "break-loop":
+                break
+        
 
 class PawetInterpreter:
 
@@ -150,7 +168,11 @@ class PawetInterpreter:
         self.variables = parent_scope
         self.functions = {}
         self.context_name = context_name
-    
+        self.structs = {}
+
+    def eval_condition(self) -> bool:
+        pass
+
     def interpret(self):
         while self.current_index < len(self.image):
             pix = self.read_next_pixel()
@@ -237,9 +259,135 @@ class PawetInterpreter:
                             raise PawetInterpreterError(self.current_index, pix, "Function not defined")
                         return self.functions[fun_name].execute(params)
                 return val
+            elif pix == Colours.IF.value:
+                if_statement, condition = self.parse_if_then_else()
+                if_statement.execute([condition])
+                continue
+            elif pix == Colours.LOOP.value:
+                pass
+            elif self.context_name == "loop" and pix == Colours.CONTINUE.value:
+                return "continue-loop"
+            elif self.context_name == "loop" and pix == Colours.BREAK.value:
+                return "break-loop"
             else:
                 raise PawetInterpreterError(self.current_index, pix, "Unexpected pixel, Did you maybe forget to escape?")
     
+    def parse_if_then_else(self):
+        bracket_started = False
+        bracket_ended = False
+        if_condition = False
+        if_body = []
+        while True:
+            pix = self.read_next_pixel()
+            if pix == Colours.SKIP.value:
+                continue
+            elif pix == Colours.BRACKET_START.value:
+                bracket_started = True
+                continue
+            elif pix == Colours.END_IF.value:
+                if not bracket_started:
+                    raise PawetInterpreterError(self.current_index, pix, "Invalid syntax for if statement")
+                break
+            elif pix == Colours.EQUATION.value:
+                if_condition = self.parse_equation()
+                continue
+            elif pix == Colours.VAR_FUN_NAME.value:
+                name, is_func, func_params = self.parse_var_fun_reference()
+                if is_func:
+                    if not name in self.functions:
+                        raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                    if_condition = self.functions[name].execute(func_params)
+                else:
+                    if not name in self.variables:
+                        raise PawetInterpreterError(self.current_index, pix, "Variable not defined")
+                    if_condition = self.variables[name][1]
+                continue
+            elif pix == Colours.TRUE.value:
+                if_condition = True
+                continue
+            elif pix == Colours.FALSE.value:
+                if_condition = False
+                continue
+            elif pix == Colours.BRACKET_END.value and bracket_started:
+                bracket_ended = True
+                continue
+            if bracket_ended:
+                if_body.append(pix)
+        if not type(if_condition) is bool:
+            raise PawetInterpreterError(self.current_index, pix, "Value in condition not a bool")
+        while self.peek_next_pixel() == Colours.SKIP.value:
+            self.read_next_pixel()
+        then_bodies = []
+        then_conditions = []
+        while self.peek_next_pixel() == Colours.THEN.value:
+            bracket_ended = False
+            bracket_started = False
+            self.read_next_pixel()  # skip the THEN pixel value
+            this_body = []
+            this_condition = False
+            while True:
+                pix = self.read_next_pixel()
+                if pix == Colours.SKIP.value:
+                    continue
+                elif pix == Colours.END_THEN.value:
+                    break
+                elif pix == Colours.BRACKET_START.value:
+                    bracket_started = True
+                    continue
+                elif pix == Colours.BRACKET_END.value and bracket_started:
+                    bracket_ended = True
+                    continue
+                elif pix == Colours.TRUE.value:
+                    this_condition = True
+                    continue
+                elif pix == Colours.FALSE.value:
+                    this_condition = False
+                    continue
+                elif pix == Colours.EQUATION.value:
+                    this_condition = self.parse_equation()
+                    continue
+                elif pix == Colours.VAR_FUN_NAME.value:
+                    name, is_func, func_params = self.parse_var_fun_reference()
+                    if is_func:
+                        if not name in self.functions:
+                            raise PawetInterpreterError(self.current_index, pix, "Function not defined")
+                        this_condition = self.functions[name].execute(func_params)
+                    else:
+                        if not name in self.variables:
+                            raise PawetInterpreterError(self.current_index, pix, "Variable not defined")
+                        this_condition = self.variables[name][1]
+                    continue
+                if bracket_ended:
+                    this_body.append(pix)
+            then_bodies.append(this_body)
+            if not type(this_condition) is bool:
+                raise PawetInterpreterError("Then-statement input is not a bool")
+            then_conditions.append(this_condition)
+            while self.peek_next_pixel() == Colours.SKIP.value:
+                self.read_next_pixel()
+        else_body = []
+        if self.peek_next_pixel() == Colours.ELSE.value:
+            self.read_next_pixel() # skip the ELSE pixel
+            while True:
+                pix = self.read_next_pixel()
+                if pix == Colours.END_ELSE.value:
+                    break
+                else_body.append(pix)
+        func = PawetIfElseBody(if_body, dict(self.variables), then_conditions, then_bodies, else_body)
+        return func, if_condition
+
+    def parse_struct_def(self):
+        struct_name: str = ""
+        struct_params = {}
+        while True:
+            pix = self.read_next_pixel()
+            if pix == Colours.SKIP.value:
+                continue
+            elif pix == Colours.STRUCT_END.value:
+                break
+            
+
+
     def parse_function_call(self):
         param_vals = []
         current_val = None
