@@ -3,7 +3,11 @@
 def convert_string(val):
     hex_literals = [hex(ord(x)).replace('0x', '') for x in val]
     remainder = len(hex_literals) % 3
-    for _ in range(0, remainder + 1):
+    if remainder % 3 == 1:
+        offset = 1
+    else:
+        offset = 0
+    for _ in range(0, remainder + offset):
         hex_literals.insert(0, '00')
     print(hex_literals)
     pixel_vals = []
