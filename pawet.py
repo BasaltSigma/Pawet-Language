@@ -20,7 +20,7 @@ class Colours(Enum):
     INDEX = 0xfe1437
     IF = 0x007f0e
     END_IF = 0x4cff00
-    THEN = 0x21ff3e
+    THEN = 0xfaff3e
     END_THEN = 0x1c1cff
     ELSE = 0x56ff94
     END_ELSE = 0xffbe47
@@ -138,24 +138,27 @@ class PawetIfElseBody(PawetBodyBase):
 class PawetLoopBody(PawetBodyBase):
 
     def __init__(self, body: list, parent_scope: dict, condition_body: list):
-        super(PawetLoopBody, self).__init__({'condition': bool}, body, "loop", parent_scope)
+        super(PawetLoopBody, self).__init__({}, body, "loop", parent_scope)
         self.condition_body = condition_body
     
     def execute(self, parameter_values: list):
         super(PawetLoopBody, self).execute(parameter_values)
-        pawet_condition = PawetInterpreter("loop-condition", False, body=self.condition_body, parent_scope=self.visible_variables)
+        pawet_condition = PawetInterpreter("loop-condition", False, body=self.condition_body, parent_scope=self.visible_variables, is_condition=True)
         pawet_body = PawetInterpreter("loop", False, body=self.body, parent_scope=self.visible_variables)
         while pawet_condition.eval_condition():
             command = pawet_body.interpret()
+            pawet_body.current_index = 0
             if type(command) is str and command == "continue-loop":
+                pawet_condition.current_index = 0
                 continue
             if type(command) is str and command == "break-loop":
                 break
+            
         
 
 class PawetInterpreter:
 
-    def __init__(self, context_name: str, base: bool, image_file_path: str = "", body: list = [], parent_scope = {}):
+    def __init__(self, context_name: str, base: bool, image_file_path: str = "", body: list = [], parent_scope = {}, is_condition=False):
         self.base = base
         if self.base:
             im = Image.open(image_file_path)
@@ -169,9 +172,31 @@ class PawetInterpreter:
         self.functions = {}
         self.context_name = context_name
         self.structs = {}
+        self.is_condition = is_condition
 
     def eval_condition(self) -> bool:
-        pass
+        evaluated = False
+        pix = self.read_next_pixel()
+        if pix == Colours.EQUATION.value:
+            evaluated = self.parse_equation(self.variables)
+        elif pix == Colours.TRUE.value:
+            evaluated = True
+        elif pix == Colours.FALSE.value:
+            evaluated = False
+        elif pix == Colours.VAR_FUN_NAME.value:
+            ref, is_func, func_params = self.parse_var_fun_reference()
+            if is_func:
+                if not ref in self.functions:
+                    raise PawetInterpreterError(self.current_index, pix, "Function in loop condition not defined")
+                evaluated = self.functions[ref].execute(func_params)
+            else:
+                if not ref in self.variables:
+                    raise PawetInterpreterError(self.current_index, pix, "Variable reference not found")
+                evaluated = self.variables[ref][1]
+        if not type(evaluated) is bool:
+            raise PawetInterpreterError(0, None, "Function condition value not a bool")
+        self.current_index = 0
+        return evaluated
 
     def interpret(self):
         while self.current_index < len(self.image):
@@ -218,14 +243,19 @@ class PawetInterpreter:
                     if not var_ref in self.variables:
                         raise PawetInterpreterError(self.current_index, pix, f"{self.context_name} Variable not initialized")
                 pix = self.read_next_pixel()
+                was_modified = False
                 if pix == Colours.INCREMENT_VAL.value:
                     if self.variables[var_ref][0] not in [int, float]:
                         raise PawetInterpreterError(self.current_index, pix, "Not an incrementable type")
                     self.variables[var_ref] = (self.variables[var_ref][0], self.variables[var_ref][1] + 1)
+                    was_modified = True
                 elif pix == Colours.DECREMENT_VAL.value:
                     if self.variables[var_ref][0] not in [int, float]:
                         raise PawetInterpreterError(self.current_index, pix, "Not a decrementable type")
                     self.variables[var_ref] = (self.variables[var_ref][0], self.variables[var_ref][1] - 1)
+                    was_modified = True
+                if was_modified:
+                    pix = self.read_next_pixel()
                 if pix != Colours.STATEMENT_END.value:
                     raise PawetInterpreterError(self.current_index, pix, "Statement not closed")
                 continue
@@ -264,7 +294,9 @@ class PawetInterpreter:
                 if_statement.execute([condition])
                 continue
             elif pix == Colours.LOOP.value:
-                pass
+                loop: PawetLoopBody = self.parse_loop()
+                loop.execute([])
+                continue
             elif self.context_name == "loop" and pix == Colours.CONTINUE.value:
                 return "continue-loop"
             elif self.context_name == "loop" and pix == Colours.BREAK.value:
@@ -272,6 +304,29 @@ class PawetInterpreter:
             else:
                 raise PawetInterpreterError(self.current_index, pix, "Unexpected pixel, Did you maybe forget to escape?")
     
+    def parse_loop(self):
+        loop_condition = []
+        loop_body = []
+        open_bracket_passed = False
+        closed_bracket_passed = False
+        while True:
+            pix = self.read_next_pixel()
+            if pix == Colours.SKIP.value:
+                continue
+            elif pix == Colours.END_LOOP.value:
+                break
+            elif pix == Colours.BRACKET_START.value:
+                open_bracket_passed = True
+                continue
+            elif pix == Colours.BRACKET_END.value and open_bracket_passed:
+                closed_bracket_passed = True
+                continue
+            if open_bracket_passed and not closed_bracket_passed:
+                loop_condition.append(pix)
+            if open_bracket_passed and closed_bracket_passed:
+                loop_body.append(pix)
+        return PawetLoopBody(loop_body, self.variables, loop_condition)
+
     def parse_if_then_else(self):
         bracket_started = False
         bracket_ended = False
@@ -289,7 +344,7 @@ class PawetInterpreter:
                     raise PawetInterpreterError(self.current_index, pix, "Invalid syntax for if statement")
                 break
             elif pix == Colours.EQUATION.value:
-                if_condition = self.parse_equation()
+                if_condition = self.parse_equation(self.variables)
                 continue
             elif pix == Colours.VAR_FUN_NAME.value:
                 name, is_func, func_params = self.parse_var_fun_reference()
@@ -344,7 +399,7 @@ class PawetInterpreter:
                     this_condition = False
                     continue
                 elif pix == Colours.EQUATION.value:
-                    this_condition = self.parse_equation()
+                    this_condition = self.parse_equation(self.variables)
                     continue
                 elif pix == Colours.VAR_FUN_NAME.value:
                     name, is_func, func_params = self.parse_var_fun_reference()
@@ -370,6 +425,8 @@ class PawetInterpreter:
             self.read_next_pixel() # skip the ELSE pixel
             while True:
                 pix = self.read_next_pixel()
+                if pix == Colours.SKIP.value:
+                    continue
                 if pix == Colours.END_ELSE.value:
                     break
                 else_body.append(pix)
@@ -386,8 +443,6 @@ class PawetInterpreter:
             elif pix == Colours.STRUCT_END.value:
                 break
             
-
-
     def parse_function_call(self):
         param_vals = []
         current_val = None
@@ -859,9 +914,9 @@ class PawetInterpreter:
                 prev_pix = pix
                 pix = self.read_next_pixel()
                 continue
-            if base and pix == Colours.EQUATION.value and prev_pix != Colours.ESCAPE_NEXT.value:
+            if (self.base or self.is_condition) and pix == Colours.EQUATION.value and prev_pix != Colours.ESCAPE_NEXT.value:
                 break
-            if not base and pix == Colours.BRACKET_END.value and prev_pix != Colours.ESCAPE_NEXT.value:
+            if not self.base and pix == Colours.BRACKET_END.value and prev_pix != Colours.ESCAPE_NEXT.value:
                 break
             if pix == Colours.LOGICAL_NOT.value:
                 prev_pix = pix
