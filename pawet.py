@@ -215,9 +215,11 @@ class PawetInterpreter:
                     raise PawetInterpreterError(self.current_index, pix, "Missing end of statement pixel for import statement")
                 if not os.path.isfile(to_import):
                     raise PawetInterpreterError(self.current_index, pix, "That pawet image file is not found")
-                paw = PawetInterpreter(True, image_file_path=to_import)
+                paw = PawetInterpreter(to_import, True, image_file_path=to_import)
+                paw.interpret()
                 self.functions.update(paw.functions)
                 self.variables.update(paw.variables)
+                self.structs.update(paw.structs)
             elif pix == Colours.BOOL_TYPE.value:
                 self.add_bool_var(self.variables)
                 continue
@@ -729,6 +731,7 @@ class PawetInterpreter:
         assignment_name = ""
         literal = None
         target_ref = None
+        negate_value = False
         while not pix == Colours.STATEMENT_END.value:
             if pix == Colours.SKIP.value:
                 pix = self.read_next_pixel()
@@ -742,6 +745,9 @@ class PawetInterpreter:
                 pix = self.read_next_pixel()
                 continue
             if past_assignment:
+                if pix == Colours.SUBTRACT.value:
+                    negate_value = True
+                    continue
                 if pix == Colours.INT_LITERAL.value:
                     literal = self.parse_int_literal()
                 elif pix == Colours.VAR_FUN_NAME.value:
@@ -754,6 +760,8 @@ class PawetInterpreter:
                 elif pix == Colours.EQUATION.value:
                     literal = self.parse_equation(context)
             pix = self.read_next_pixel()
+        if negate_value:
+            literal = -literal
         if assignment_name in context:
             raise PawetInterpreterError(self.current_index, pix, "Variable already declared")
         if target_ref != None and literal == None:
@@ -771,6 +779,7 @@ class PawetInterpreter:
         assignment_name = ""
         literal = None
         target_ref = None
+        negate_value = False
         while not pix == Colours.STATEMENT_END.value:
             if pix == Colours.SKIP.value:
                 pix = self.read_next_pixel()
@@ -784,6 +793,9 @@ class PawetInterpreter:
                 pix = self.read_next_pixel()
                 continue
             if past_assignment:
+                if pix == Colours.SUBTRACT.value:
+                    negate_value = True
+                    continue
                 if pix == Colours.FLOAT_LITERAL.value:
                     literal = self.parse_float_literal()
                 elif pix == Colours.VAR_FUN_NAME.value:
@@ -796,6 +808,8 @@ class PawetInterpreter:
                 elif pix == Colours.EQUATION.value:
                     literal = self.parse_equation(context)
             pix = self.read_next_pixel()
+        if negate_value:
+            literal = -literal
         if assignment_name in context:
             raise PawetInterpreterError(self.current_index, pix, "Variable already declared")
         if target_ref != None and literal == None:
